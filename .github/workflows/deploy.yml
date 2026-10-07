@@ -1,0 +1,43 @@
+name: Deploy jinclass to Oracle
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: jinclass-production
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+      - name: Deploy static build and verify revision
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+          SITE_PORT: '8891'
+        run: |
+          set -euo pipefail
+          for name in VPS_HOST VPS_USER VPS_SSH_KEY VPS_KNOWN_HOSTS; do
+            if [ -z "${!name}" ]; then echo "Missing secret: $name"; exit 1; fi
+          done
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          tar -cf "$RUNNER_TEMP/site.tar" dist
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 -i ~/.ssh/deploy "$VPS_USER@$VPS_HOST" "deploy $GITHUB_SHA" < "$RUNNER_TEMP/site.tar"
+          curl -fsS --connect-timeout 10 --max-time 20 --retry 1 "http://$VPS_HOST:$SITE_PORT/deploy-version.json?commit=$GITHUB_SHA" > "$RUNNER_TEMP/deployed.json"
+          node -e 'const fs=require("fs");if(JSON.parse(fs.readFileSync(process.argv[1])).commit!==process.env.GITHUB_SHA)throw Error("Oracle revision mismatch");console.log("Verified:",process.env.GITHUB_SHA)' "$RUNNER_TEMP/deployed.json"
